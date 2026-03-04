@@ -154,4 +154,4 @@ app.get('/rc', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`🚗 RC API running at http://localhost:${PORT}/rc?id=PB13BU4064`));
+app.listen(PORT, () => console.log(`🚗 RC API running at http://localhost:${PORT}/rc?query=PB13BU4064`));
