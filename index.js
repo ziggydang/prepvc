@@ -1,157 +1,383 @@
-const express = require('express');
-const axios = require('axios');
+const express = require("express");
+const axios = require("axios");
+const crypto = require("crypto");
+const FormData = require("form-data");
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- CONFIGURATION ---
-const GEMINI_API_KEY = "AIzaSyDICDlk4jbOWpWNXAfQdkj_JF6uYFgJ0XM";
-const BOT_TOKEN = "8623539499:AAEa8duJ5DYMGOItrq0VMMDo7ZBzELnJ72A";
-const CHAT_ID = "7977257906";
+const AES_KEY = "RTO@N@1V@$U2024#";
 
-const monthNames = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+const AES_ALGORITHM = "aes-128-ecb";
+const INPUT_ENCODING = "utf8";
+const OUTPUT_ENCODING = "base64";
 
-// --- HELPERS ---
+const CUSTOM_RESPONSE_MESSAGE = "Fetched [ SENPAI ]";
 
-const isValid = (val) => {
-    const invalid = [null, undefined, "", "NA", "0", 0, "NULL", "NAN", "_ _", "NOT AVAILABLE", "UNDEFINED", "NONE"];
-    return val !== null && val !== undefined && !invalid.includes(String(val).trim().toUpperCase());
+const CARS24_CONFIG = {
+  BASE_URL: "https://seller-lead.cars24.team",
+  AUTH_HEADER: "Basic ",
+  PVT_AUTH_HEADER: "Bearer ",
+  PHONE_NUMBER: "",
+  USER_ID: ""
 };
 
-const validate = (val) => isValid(val) ? val : "_ _";
+function encrypt(plaintext, key) {
+  const keyBuffer = Buffer.from(key, INPUT_ENCODING);
+  const cipher = crypto.createCipheriv(AES_ALGORITHM, keyBuffer, null);
+  cipher.setAutoPadding(true);
+  let encrypted = cipher.update(plaintext, INPUT_ENCODING, OUTPUT_ENCODING);
+  encrypted += cipher.final(OUTPUT_ENCODING);
+  return encrypted;
+}
 
-/**
- * Feature: Automatic kW Calculation
- * Input: HP or CC
- * Output: "292.46 kW" (Example)
- */
-const calculateKw = (hpRaw, ccRaw) => {
-    let hp = 0;
-    if (isValid(hpRaw)) {
-        hp = parseFloat(hpRaw);
-    } else if (isValid(ccRaw)) {
-        // Indian Automotive Estimation: CC / 15
-        hp = parseFloat(ccRaw) / 15;
+function decrypt(ciphertextBase64, key) {
+  try {
+    const keyBuffer = Buffer.from(key, INPUT_ENCODING);
+    const decipher = crypto.createDecipheriv(AES_ALGORITHM, keyBuffer, null);
+    decipher.setAutoPadding(true);
+    let decrypted = decipher.update(ciphertextBase64, OUTPUT_ENCODING, INPUT_ENCODING);
+    decrypted += decipher.final(INPUT_ENCODING);
+    return decrypted;
+  } catch (error) {
+    console.error("❌ Decryption error:", error.message);
+    return null;
+  }
+}
+
+async function getUnmaskedData(rcNumber) {
+  try {
+    const { data } = await axios.get(`http://147.93.27.177:3000/rc?search=${rcNumber}`);
+    if (data.code === "SUCCESS" && data.data) {
+      return {
+        owner_name: data.data.registration_details?.owner_name,
+        father_name: data.data.ownership_details?.father_name,
+        vehicle_age: data.data.important_dates?.vehicle_age
+      };
     }
+    return null;
+  } catch (error) {
+    console.warn("⚠️ Unmasked API failed:", error.message);
+    return null;
+  }
+}
 
-    if (hp > 0) {
-        let kw = hp * 0.7457; // 1 HP = 0.7457 kW
-        return `${kw.toFixed(2)} kW`;
-    }
-    return "_ _";
-};
+async function getChallanInfo(rcNumber) {
+  try {
+    console.log(`🚓 Fetching challan info for: ${rcNumber}`);
 
-const formatToEnglishDate = (dateStr) => {
-    if (!isValid(dateStr)) return "_ _";
-    try {
-        const separator = dateStr.includes('/') ? '/' : (dateStr.includes('-') ? '-' : ' ');
-        const parts = dateStr.split(separator);
-        if (parts.length < 3) return dateStr.toUpperCase();
-        let day = String(parseInt(parts[0])).padStart(2, '0');
-        let monthIdx = isNaN(parts[1]) ? monthNames.indexOf(parts[1].toUpperCase().substring(0,3)) : parseInt(parts[1]) - 1;
-        let year = parts[2].length === 2 ? "20" + parts[2] : parts[2];
-        return (monthIdx >= 0 && monthIdx <= 11) ? `${day}-${monthNames[monthIdx]}-${year}` : dateStr.toUpperCase();
-    } catch (e) { return dateStr.toUpperCase(); }
-};
+    const leadData = {
+      phone: CARS24_CONFIG.PHONE_NUMBER,
+      vehicle_reg_no: rcNumber,
+      user_id: CARS24_CONFIG.USER_ID,
+      whatsapp_consent: true,
+      type: "challan",
+      device_category: "Mweb"
+    };
 
-const getAiRefinedData = async (make, model) => {
-    try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-        const payload = {
-            contents: [{ parts: [{ text: `Provide tech specs for Indian vehicle "${make} ${model}". Return ONLY JSON: {"body_type":"string","unladen_weight_kg":"string","hp_kw":"string","wheel_base_mm":"string","cylinders":"string","seating":"string"}` }]}],
-            generationConfig: { response_mime_type: "application/json" }
-        };
-        const response = await axios.post(url, payload, { timeout: 10000 });
-        return JSON.parse(response.data.candidates[0].content.parts[0].text);
-    } catch (err) { return null; }
-};
-
-// --- ROUTES ---
-
-app.get('/rc', async (req, res) => {
-    const rawRegNo = (req.query.query || req.query.id)?.toUpperCase().replace(/\s/g, '');
-    if (!rawRegNo) return res.status(400).json({ status: "Error", message: "ID Required" });
-
-    try {
-        const apiUrl = `https://prevehicle-source-code-api.onrender.com/rc?query=${rawRegNo}&key=preSENPAI_UNLIMITED_ADMIN&_=${Date.now()}`;
-        const apiResponse = await axios.get(apiUrl, { timeout: 25000 });
-        
-        const full = apiResponse.data?.rc_chudai || {};
-        const rcMain = full.data?.[0] || {};
-        const ext = full.external_info || {};
-        const basic = ext.basic_vehicle_info || {};
-        const regDoc = ext.registration_documents || {};
-        const owner = ext.owner_details || {};
-        const rto = ext.rto_details || {};
-
-        if (!rcMain.reg_no && !basic.registration_number) {
-            return res.status(404).json({ status: "Error", message: "Vehicle Not Found" });
+    const leadResponse = await axios.post(
+      `${CARS24_CONFIG.BASE_URL}/prospect/lead`,
+      leadData,
+      {
+        headers: {
+          'authority': 'seller-lead.cars24.team',
+          'accept': 'application/json, text/plain, */*',
+          'authorization': CARS24_CONFIG.AUTH_HEADER,
+          'content-type': 'application/json',
+          'origin': 'https://www.cars24.com',
+          'pvtauthorization': CARS24_CONFIG.PVT_AUTH_HEADER,
+          'referer': 'https://www.cars24.com/',
+          'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
         }
+      }
+    );
 
-        // --- DATA MAPPING ---
-        const make = (isValid(basic.make) ? basic.make : (rcMain.maker || "UNKNOWN")).toUpperCase();
-        const model = (isValid(basic.model) ? basic.model : (rcMain.maker_modal || "VEHICLE")).toUpperCase();
-        
-        let bodyType = isValid(rcMain.body_type_desc) ? rcMain.body_type_desc : (rcMain.vh_body_type || "_ _");
-        let unladenWt = isValid(rcMain.rc_unld_wt) ? rcMain.rc_unld_wt : (rcMain.vehicle_weight || "_ _");
-        let cubicCap = isValid(basic.cubic_capacity_cc) ? basic.cubic_capacity_cc : (rcMain.cubic_cap || "_ _");
-        
-        // Final kW Logic
-        let kwValue = calculateKw(rcMain.hp, cubicCap);
-        
-        let wheelbase = isValid(rcMain.wheelbase) ? rcMain.wheelbase : (rcMain.vh_wheelbase || "_ _");
-        let cylinders = isValid(rcMain.no_of_cyl) ? rcMain.no_of_cyl : "_ _";
-        let seating = isValid(basic.seating_capacity) ? basic.seating_capacity : (rcMain.no_of_seats || "_ _");
-
-        // AI Backup Logic
-        if (bodyType === "_ _" || unladenWt === "_ _" || kwValue === "_ _") {
-            const aiData = await getAiRefinedData(make, model);
-            if (aiData) {
-                bodyType = bodyType === "_ _" ? aiData.body_type : bodyType;
-                unladenWt = unladenWt === "_ _" ? aiData.unladen_weight_kg : unladenWt;
-                kwValue = kwValue === "_ _" ? (aiData.hp_kw.includes("kW") ? aiData.hp_kw : `${aiData.hp_kw} kW`) : kwValue;
-                wheelbase = wheelbase === "_ _" ? aiData.wheel_base_mm : wheelbase;
-                cylinders = cylinders === "_ _" ? aiData.cylinders : cylinders;
-            }
-        }
-
-        // --- FINAL FORMATTED RESPONSE ---
-        const finalResponse = {
-            status: "OK",
-            state_code: rawRegNo.substring(0, 2),
-            vehicle_details: {
-                registration_number: validate(basic.registration_number || rcMain.reg_no),
-                registration_date: formatToEnglishDate(regDoc.registration_date || rcMain.regn_dt),
-                category: (rcMain.is_commercial === true || (rcMain.vh_class || "").toUpperCase().includes("GOODS")) ? "TP" : "NT",
-                serial: (isValid(rcMain.owner_sr_no) && rcMain.owner_sr_no != 0) ? String(rcMain.owner_sr_no) : "1",
-                chassis_number: validate(regDoc.chassis_no || rcMain.chasi_no),
-                engine_number: validate(regDoc.engine_no || rcMain.engine_no),
-                owner_name: validate(owner.owner_name || rcMain.owner_name),
-                address: validate(owner.permanent_address || rcMain.address),
-                fuel_type: (isValid(basic.fuel_type) ? basic.fuel_type : (rcMain.fuel_type || "_ _")).toUpperCase(),
-                vehicle_class: validate(rcMain.vh_class).toUpperCase(),
-                manufacturer: make,
-                model: model,
-                colour: validate(rcMain.vehicle_color || rcMain.vh_color).toUpperCase(),
-                body_type: String(bodyType).toUpperCase(),
-                seating_capacity: String(seating),
-                unladen_weight_kg: String(unladenWt),
-                cubic_capacity: String(cubicCap),
-                horse_power: kwValue, // Always output in "XX.XX kW"
-                wheelbase: String(wheelbase),
-                financier: (validate(rcMain.financer_details) === "_ _" || rcMain.financer_details.toLowerCase().includes("cash")) ? "NOT HYPOTHECATED" : rcMain.financer_details.toUpperCase(),
-                manufacturing_date: validate(rcMain.manufacturer_month_yr || basic.manufacturing_year),
-                cylinders: String(cylinders),
-                norms: validate(rcMain.fuel_norms).toUpperCase(),
-                valid_upto: formatToEnglishDate(rcMain.fitness_upto),
-                authority: validate(rto.rto_location || rcMain.rto).toUpperCase()
-            }
-        };
-
-        res.json(finalResponse);
-
-    } catch (error) {
-        res.status(500).json({ status: "Error", message: "Internal server error" });
+    if (!leadResponse.data.success) {
+      console.warn("⚠️ Failed to create lead:", leadResponse.data.message);
+      return null;
     }
+
+    const token = leadResponse.data.detail.token;
+    console.log(`✅ Lead created successfully, token: ${token}`);
+
+    const challanResponse = await axios.get(
+      `${CARS24_CONFIG.BASE_URL}/challan/list/${token}`,
+      {
+        headers: {
+          'authority': 'seller-lead.cars24.team',
+          'accept': 'application/json, text/plain, */*',
+          'authorization': CARS24_CONFIG.AUTH_HEADER,
+          'device_category': 'm-web',
+          'origin': 'https://www.cars24.com',
+          'origin_source': 'c2b-website',
+          'platform': 'Challan',
+          'pvtauthorization': CARS24_CONFIG.PVT_AUTH_HEADER,
+          'referer': 'https://www.cars24.com/',
+          'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
+        }
+      }
+    );
+
+    if (challanResponse.data.status === 200) {
+      console.log(`✅ Found challan data for ${rcNumber}`);
+      return challanResponse.data.detail;
+    } else {
+      console.warn("⚠️ No challan data found or API error");
+      return null;
+    }
+
+  } catch (error) {
+    console.warn("⚠️ Challan API failed:", error.message);
+    return null;
+  }
+}
+
+function processChallanData(challanDetail) {
+  if (!challanDetail) return null;
+
+  const processed = {
+    processing_status: challanDetail.processingStatus,
+    total_online_amount: challanDetail.pendingChallans?.totalOnlineChallanAmount || 0,
+    total_offline_amount: challanDetail.pendingChallans?.totalOfflineChallanAmount || 0,
+    total_amount: (challanDetail.pendingChallans?.totalOnlineChallanAmount || 0) + 
+                  (challanDetail.pendingChallans?.totalOfflineChallanAmount || 0),
+    pending_challans: []
+  };
+
+  if (challanDetail.pendingChallans?.physicalCourtChallans) {
+    challanDetail.pendingChallans.physicalCourtChallans.forEach(challan => {
+      processed.pending_challans.push({
+        challan_no: challan.challanNo,
+        unique_id: challan.uniqueIdentifier,
+        status: challan.status,
+        computed_status: challan.computedStatus,
+        offence_name: challan.offences?.[0]?.offenceName || "Unknown Offence",
+        penalty_amount: challan.amount,
+        date_time: challan.dateTime,
+        location: challan.offenceLocation,
+        state: challan.stateCd,
+        court_type: challan.courtType,
+        payment_status: challan.paymentStatus,
+        pending_duration: challan.challanPendingFor,
+        is_payable: challan.isPayable,
+        challan_images: challan.challanImages || [],
+        provider_type: challan.challanProviderSubType
+      });
+    });
+  }
+
+  if (challanDetail.pendingChallans?.virtualCourtChallans) {
+    challanDetail.pendingChallans.virtualCourtChallans.forEach(challan => {
+      processed.pending_challans.push({
+        challan_no: challan.challanNo,
+        unique_id: challan.uniqueIdentifier,
+        status: challan.status,
+        computed_status: challan.computedStatus,
+        offence_name: challan.offences?.[0]?.offenceName || "Unknown Offence",
+        penalty_amount: challan.amount,
+        date_time: challan.dateTime,
+        location: challan.offenceLocation,
+        state: challan.stateCd,
+        court_type: challan.courtType,
+        payment_status: challan.paymentStatus,
+        pending_duration: challan.challanPendingFor,
+        is_payable: challan.isPayable,
+        challan_images: challan.challanImages || [],
+        provider_type: challan.challanProviderSubType
+      });
+    });
+  }
+
+  if (challanDetail.pendingChallans?.recentlyAddedChallans) {
+    challanDetail.pendingChallans.recentlyAddedChallans.forEach(challan => {
+      processed.pending_challans.push({
+        challan_no: challan.challanNo,
+        unique_id: challan.uniqueIdentifier,
+        status: challan.status,
+        computed_status: challan.computedStatus,
+        offence_name: challan.offences?.[0]?.offenceName || "Unknown Offence",
+        penalty_amount: challan.amount,
+        date_time: challan.dateTime,
+        location: challan.offenceLocation,
+        state: challan.stateCd,
+        court_type: challan.courtType,
+        payment_status: challan.paymentStatus,
+        pending_duration: challan.challanPendingFor,
+        is_payable: challan.isPayable,
+        challan_images: challan.challanImages || [],
+        provider_type: challan.challanProviderSubType
+      });
+    });
+  }
+
+  processed.pending_challans.sort((a, b) => new Date(b.date_time) - new Date(a.date_time));
+
+  return processed;
+}
+
+function formatChallanResponse(processedChallanInfo) {
+  if (!processedChallanInfo) {
+    return {
+      status: false,
+      response_code: 404,
+      response_message: "No challan information available",
+      data: []
+    };
+  }
+
+  return {
+    status: true,
+    response_code: 200,
+    response_message: "Challan information fetched successfully",
+    data: [processedChallanInfo]
+  };
+}
+
+function mergeRcData(originalData, unmaskedData) {
+  if (!originalData.data || !Array.isArray(originalData.data) || originalData.data.length === 0) {
+    return originalData;
+  }
+
+  const mergedData = { ...originalData };
+  const rcItem = { ...mergedData.data[0] };
+
+  if (unmaskedData) {
+    if (unmaskedData.owner_name && rcItem.owner_name && rcItem.owner_name.includes('*')) {
+      console.log(`🔄 Replacing owner_name: ${rcItem.owner_name} → ${unmaskedData.owner_name}`);
+      rcItem.owner_name = unmaskedData.owner_name;
+    }
+
+    if (unmaskedData.father_name && rcItem.father_name && rcItem.father_name.includes('*')) {
+      console.log(`🔄 Replacing father_name: ${rcItem.father_name} → ${unmaskedData.father_name}`);
+      rcItem.father_name = unmaskedData.father_name;
+    }
+
+    if (unmaskedData.vehicle_age) {
+      console.log(`🔄 Adding vehicle_age: ${unmaskedData.vehicle_age}`);
+      rcItem.vehicle_age = unmaskedData.vehicle_age;
+    } else if (!rcItem.vehicle_age) {
+      console.log(`ℹ️ No vehicle_age available from unmasked API`);
+    }
+  }
+
+  mergedData.response_message = CUSTOM_RESPONSE_MESSAGE;
+  console.log(`✅ Response message set to: "${CUSTOM_RESPONSE_MESSAGE}"`);
+
+  mergedData.data = [rcItem];
+  return mergedData;
+}
+
+function decryptApiResponse(encryptedResponse) {
+  try {
+
+    if (typeof encryptedResponse === 'string') {
+      const decrypted = decrypt(encryptedResponse, AES_KEY);
+      if (decrypted) {
+        try {
+          return JSON.parse(decrypted);
+        } catch (parseError) {
+          console.log("⚠️ Decrypted data is not JSON, returning as string");
+          return decrypted;
+        }
+      }
+    }
+
+    return encryptedResponse;
+  } catch (error) {
+    console.error("❌ Response decryption error:", error.message);
+    return encryptedResponse;
+  }
+}
+
+app.get("/rc", async (req, res) => {
+  const rc = req.query.query;
+
+  if (!rc) {
+    return res.status(400).json({
+      status: false,
+      message: "Missing query parameter. Example: /rc?query=UK04AQ9000",
+    });
+  }
+
+  try {
+
+    const [unmaskedData, challanDetail] = await Promise.all([
+      getUnmaskedData(rc),
+      getChallanInfo(rc)
+    ]);
+
+    const processedChallanInfo = processChallanData(challanDetail);
+
+    const encryptedRc = encrypt(rc, AES_KEY);
+    console.log(`🔐 Encrypted RC: ${encryptedRc}`);
+
+    const formData = new FormData();
+
+    formData.append('YLnoBJXFHWIb6n+vaU5Fqw===', 'hEetH/fxDYkaiPV1O08JXGavuWKAHB7H//KqlbPQizq1sxbHamO8edqhIcOJJybWVc4wf11tUxC1uEtwt2OHiKuzQ4fSmex9pkrf6bj/yztMQT9yb5+E3V3RttX0S1WRXRiNakRvo+pOiu6k8j8M+C6aLHvrWxqTQnP9ND0xv3EQyxcgjYt5rk2qVOWP+nf8');
+    formData.append('uniDRnuJvTpCyd8qqa7bmg===', '6UcabyegT3XEmP2Mw0Jwfw==');
+    formData.append('wmbVbuTELPkity3gk1FSLw===', 'hwc6sd9eQz3sd8aZ5tWtOSO9P/8c0ruHIRUDVqC4PzmK3ZgUJ5W/1ibrOgk6+bHhGaWCca3iQ6qfy5v/zhdLXw==');
+    formData.append('kqvOc7zzeKL9GQi3s97hRg===', 'KOgloc/Wkh/JKFVr/Y5bZA==');
+    formData.append('6itFonmUeG7GaEL8YAz1dw===', 'DHKgKTb0PD667WXK14bQxQ==');
+    formData.append('gaQw08ye60GZvOaEjDxwSg===', '7Xx2UpV+mliqWirrrkrJ4A==');
+    formData.append('KldjgNJiCoLPelKQK12wCg===', 'Wg4luew+ZNYaVLvuYevUwhJMt5Q0FwINOnT3ntNuXiM=');
+    formData.append('8qv0XiLt71c2Mcb7A/0ETw===', '2femjV0XNiZlRIoza3rq/Q==');
+    formData.append('zKMffadDKn74L6D8Erq/Ow===', 'HjCiWD0aGnOHqRk+sJhmSg==');
+    formData.append('aQ1IgwRQsEsftk0pG3qVOA===', 'NDEpmB1IH3r0ZWPKlDX42g==');
+    formData.append('kxBCVJqsDl1CnYYrPI+ESg===', '6UcabyegT3XEmP2Mw0Jwfw==');
+
+    formData.append('4svShi1T5ftaZPNNHhJzig===', encryptedRc);
+
+    formData.append('lES0BMK4Gbc62W3W5/cR3Q===', '6UcabyegT3XEmP2Mw0Jwfw==');
+    formData.append('5ES5V9fBsVv2zixvup+QfGUYTXf6w2Wb7rfo1vbyiZo==', '6UcabyegT3XEmP2Mw0Jwfw==');
+    formData.append('w0dcvRNvk81864M2TM1R4w===', '4n04akOAWVJ7qY7ccwxckA==');
+    formData.append('Qh35ea+zP5C5YndUy+/5hQ===', 'Eky3lDQXAg06dPee025eIw==');
+    formData.append('zdR9T9RDHgdRB7xdozvLRNUdr4dDNKvva1aeDyqC22ASTLeUNBcCDTp0957Tbl4j=', 'zeLxdIWt2S3VdsxhpTwY1A==');
+    formData.append('eMY6P1CkF0Iya2o8nxqYGpW47fJY0qkIn/5knbV9Kos==', 'zeLxdIWt2S3VdsxhpTwY1A==');
+
+    const { data } = await axios.post(
+      "https://rcdetailsapi.vehicleinfo.app/api/vasu_rc_doc_details",
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+          'User-Agent': 'okhttp/5.0.0-alpha.11',
+          'Accept-Encoding': 'gzip',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'authorization': '',
+          'version_code': '13.39',
+          'device_type': 'android'
+        },
+        http2: true
+      }
+    );
+
+    let rc_xhudai = decryptApiResponse(data);
+    console.log("🔓 Decrypted response type:", typeof rc_xhudai);
+
+    if (rc_xhudai && typeof rc_xhudai === 'object') {
+      rc_xhudai = mergeRcData(rc_xhudai, unmaskedData);
+    }
+
+    const response = {
+      query: rc,
+      rc_chudai: rc_xhudai,
+      challan_info: formatChallanResponse(processedChallanInfo)
+    };
+
+    res.json(response);
+  } catch (error) {
+    console.error("❌ Request error:", error.message);
+    res.status(500).json({
+      status: false,
+      message: "Failed to fetch RC details",
+      error: error.response?.data || error.message,
+    });
+  }
 });
 
-app.listen(PORT, () => console.log(`🚗 RC API running at http://localhost:${PORT}/rc?query=PB13BU4064`));
+app.listen(PORT, () => {
+  console.log(`🚗 RC API running at http://localhost:${PORT}/rc?query=UK04AQ9000`);
+  console.log(`📝 Current response message: "${CUSTOM_RESPONSE_MESSAGE}"`);
+  console.log(`🔐 Using new AES encryption with key: ${AES_KEY}`);
+  console.log(`🚓 Challan information feature: ENABLED`);
+});
